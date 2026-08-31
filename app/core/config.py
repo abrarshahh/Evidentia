@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     DEBUG: bool
     PORT: int
 
-    # Security & Auth
+    # Security & Auth (loaded from .env)
     SECRET_KEY: SecretStr
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
@@ -54,6 +54,9 @@ class Settings(BaseSettings):
 
     def get_qdrant_api_key(self) -> Optional[str]:
         return self.QDRANT_API_KEY.get_secret_value() if self.QDRANT_API_KEY else None
+
+    def get_openai_api_key(self) -> Optional[str]:
+        return self.OPENAI_API_KEY.get_secret_value() if self.OPENAI_API_KEY else None
 
     def get_gemini_api_key(self) -> Optional[str]:
         return self.GEMINI_API_KEY.get_secret_value() if self.GEMINI_API_KEY else None
