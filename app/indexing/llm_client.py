@@ -1,5 +1,6 @@
 import re
 import json
+import asyncio
 import logging
 from typing import Optional, Dict, Any
 from google import genai
@@ -13,7 +14,8 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """
     Dedicated Gemini LLM Client using official Google GenAI SDK (google-genai)
-    targeting active production models (gemini-3.6-flash, gemini-3.5-flash, gemini-2.5-pro).
+    targeting active production models (gemini-3.6-flash, gemini-3.5-flash, gemini-2.5-pro, gemini-2.5-flash-lite)
+    with automatic 429 rate limit backoff.
     """
 
     def __init__(self):
@@ -32,7 +34,7 @@ class LLMClient:
         model_name: str = "gemini-3.6-flash",
     ) -> str:
         """
-        Generate text using official Google GenAI SDK with fallback across Gemini models.
+        Generate text using official Google GenAI SDK with fallback across Gemini models and rate limit handling.
         """
         if not self.genai_client:
             raise RuntimeError("GEMINI_API_KEY is not configured in .env")
@@ -41,41 +43,26 @@ class LLMClient:
         if system_instruction:
             config = types.GenerateContentConfig(system_instruction=system_instruction)
 
-        # Try primary model: gemini-3.6-flash
-        try:
-            response = self.genai_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=config,
-            )
-            if response and response.text:
-                return response.text.strip()
-        except Exception as e:
-            logger.warning(f"Gemini model {model_name} failed: {e}. Trying gemini-3.5-flash...")
+        models_to_try = [model_name, "gemini-3.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
 
-        # Fallback 1: gemini-3.5-flash
-        try:
-            response = self.genai_client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=prompt,
-                config=config,
-            )
-            if response and response.text:
-                return response.text.strip()
-        except Exception as ex:
-            logger.warning(f"Gemini fallback gemini-3.5-flash failed: {ex}. Trying gemini-2.5-pro...")
-
-        # Fallback 2: gemini-2.5-pro
-        try:
-            response = self.genai_client.models.generate_content(
-                model="gemini-2.5-pro",
-                contents=prompt,
-                config=config,
-            )
-            if response and response.text:
-                return response.text.strip()
-        except Exception as ex:
-            logger.error(f"Gemini fallback gemini-2.5-pro failed: {ex}")
+        for m in models_to_try:
+            for attempt in range(2):
+                try:
+                    response = self.genai_client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=config,
+                    )
+                    if response and response.text:
+                        return response.text.strip()
+                except Exception as e:
+                    err_msg = str(e)
+                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        logger.warning(f"Rate limit on model {m} (attempt {attempt+1}): waiting 3s...")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.warning(f"Gemini model {m} failed: {e}. Trying fallback model...")
+                        break
 
         raise RuntimeError("All Gemini model requests failed. Check GEMINI_API_KEY or model availability.")
 
