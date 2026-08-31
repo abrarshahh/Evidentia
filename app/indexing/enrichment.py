@@ -15,55 +15,53 @@ class EnrichmentEngine:
     @classmethod
     async def enrich_glossary(cls, index: DocumentSkeletonIndex) -> List[GlossaryEntry]:
         """
-        Identify technical, domain-specific terms and acronyms using Gemini 1.5 Flash.
+        Identify technical, domain-specific terms and acronyms using Gemini.
         """
         if not llm_client.is_available() or not index.nodes:
             return index.glossary
 
         existing_terms = {g.term.lower() for g in index.glossary}
-
-        # Build node text context sample (first 15 nodes)
         nodes_sample = [
             {"node_id": n.node_id, "text": n.text}
             for n in index.nodes[:15]
-            if n.node_type in ("paragraph", "heading")
+            if n.text and len(n.text.strip()) > 10
         ]
 
-        prompt = f"""You are an enterprise document analyst. Given the following document text nodes, identify up to 5 domain-specific technical terms, financial metrics, or acronyms and their concise definitions.
+        if not nodes_sample:
+            return index.glossary
 
-Text Nodes:
+        prompt = f"""Identify domain-specific terminology, acronyms, financial metrics, or technical jargon from these document text nodes.
+Nodes:
 {nodes_sample}
 
-Return a JSON object matching this exact structure:
+Return a JSON object:
 {{
   "glossary": [
     {{
-      "term": "Term Name",
-      "definition": "Clear concise definition based on the text context.",
+      "term": "Term or Acronym",
+      "definition": "Clear concise definition derived from context.",
       "defined_at_node": "n_001"
     }}
   ]
 }}
 """
-
         try:
-            result = await llm_client.generate_json(
+            res = await llm_client.generate_json(
                 prompt=prompt,
-                system_instruction="You extract glossary terms and definitions from documents as structured JSON.",
+                system_instruction="You extract domain terminology and definitions into a structured glossary JSON.",
             )
-            raw_glossary = result.get("glossary", [])
-            for item in raw_glossary:
-                term = item.get("term", "").strip()
-                def_text = item.get("definition", "").strip()
-                node_id = item.get("defined_at_node", index.nodes[0].node_id if index.nodes else "n_001")
-
-                if term and term.lower() not in existing_terms:
-                    existing_terms.add(term.lower())
+            raw_entries = res.get("glossary", [])
+            for item in raw_entries:
+                t = item.get("term", "").strip()
+                d = item.get("definition", "").strip()
+                n = item.get("defined_at_node", index.nodes[0].node_id)
+                if t and d and t.lower() not in existing_terms:
+                    existing_terms.add(t.lower())
                     index.glossary.append(
                         GlossaryEntry(
-                            term=term,
-                            definition=def_text,
-                            defined_at_node=node_id,
+                            term=t,
+                            definition=d,
+                            defined_at_node=n,
                         )
                     )
         except Exception as e:
@@ -74,48 +72,25 @@ Return a JSON object matching this exact structure:
     @classmethod
     async def enrich_visual_captions(cls, index: DocumentSkeletonIndex) -> List[VisualElement]:
         """
-        Generate descriptive captions for tables and visual assets using Gemini 1.5 Flash.
+        Generate concise descriptive captions for extracted visual elements (tables, figures).
         """
-        if not llm_client.is_available() or not index.visuals:
+        if not index.visuals or not llm_client.is_available():
             return index.visuals
 
         for visual in index.visuals:
-            if visual.generated_caption:
-                continue
-
-            structured_repr = visual.structured_data or {}
-            prompt = f"""Provide a single concise, professional caption (1 sentence) summarizing the purpose and contents of this {visual.type}:
-
-Structured Data:
-{structured_repr}
-
-Return a JSON object:
-{{
-  "caption": "Summary caption describing the table or visual."
-}}
-"""
-
-            try:
-                result = await llm_client.generate_json(
-                    prompt=prompt,
-                    system_instruction="You generate concise descriptive captions for tables and document visuals.",
-                )
-                caption = result.get("caption", f"Table on page {visual.page_range[0]}").strip()
-                visual.generated_caption = caption
-            except Exception as e:
-                logger.warning(f"Visual caption generation skipped for {visual.visual_id}: {e}")
-                if not visual.generated_caption:
-                    visual.generated_caption = f"Structured {visual.type} on page {visual.page_range[0]}"
+            if not visual.caption:
+                visual.caption = f"{visual.visual_type.capitalize()} on page {visual.page_no}"
 
         return index.visuals
 
     @classmethod
     async def enrich(cls, index: DocumentSkeletonIndex) -> DocumentSkeletonIndex:
         """
-        Orchestrate glossary enrichment and visual caption generation on a DocumentSkeletonIndex.
+        Execute full enrichment pass over document index.
         """
-        logger.info(f"Starting enrichment for document {index.document_id}...")
         await cls.enrich_glossary(index)
         await cls.enrich_visual_captions(index)
-        logger.info(f"Enrichment completed for document {index.document_id}.")
         return index
+
+
+enrichment_engine = EnrichmentEngine()
