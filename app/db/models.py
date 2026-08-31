@@ -278,7 +278,7 @@ class TraceSpan(Base):
     __tablename__ = "trace_spans"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=True)
     parent_span_id = Column(UUID(as_uuid=True), ForeignKey("trace_spans.id"), nullable=True)
     step = Column(String, nullable=False)
     agent_name = Column(String, nullable=True)
