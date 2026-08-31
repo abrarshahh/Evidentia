@@ -53,13 +53,12 @@ class Settings(BaseSettings):
         return self.MINIO_SECRET_KEY.get_secret_value()
 
     def get_qdrant_api_key(self) -> Optional[str]:
-        return self.QDRANT_API_KEY.get_secret_value() if self.QDRANT_API_KEY else None
-
-    def get_openai_api_key(self) -> Optional[str]:
-        return self.OPENAI_API_KEY.get_secret_value() if self.OPENAI_API_KEY else None
+        val = getattr(self, "QDRANT_API_KEY", None)
+        return val.get_secret_value() if val else None
 
     def get_gemini_api_key(self) -> Optional[str]:
-        return self.GEMINI_API_KEY.get_secret_value() if self.GEMINI_API_KEY else None
+        val = getattr(self, "GEMINI_API_KEY", None)
+        return val.get_secret_value() if val else None
 
     model_config = SettingsConfigDict(
         env_file=".env",

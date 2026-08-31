@@ -7,9 +7,11 @@ from qdrant_client.models import (
 
 from app.core.config import settings
 
+COLLECTION_NAME = "evidentia_chunks"
+
 
 class QdrantStorage:
-    COLLECTION_NAME = "evidentia_chunks"
+    COLLECTION_NAME = COLLECTION_NAME
 
     def __init__(self):
         api_key = settings.get_qdrant_api_key()
@@ -25,11 +27,15 @@ class QdrantStorage:
             api_key=api_key,
         )
 
-    def init_collection(self, vector_size: int = 1536) -> None:
+    def init_collection(self, vector_size: int = 768, recreate: bool = False) -> None:
         """
         Initialize the shared evidentia_chunks collection and create payload indexes.
         """
         collections = [c.name for c in self.sync_client.get_collections().collections]
+        if recreate and self.COLLECTION_NAME in collections:
+            self.sync_client.delete_collection(collection_name=self.COLLECTION_NAME)
+            collections.remove(self.COLLECTION_NAME)
+
         if self.COLLECTION_NAME not in collections:
             self.sync_client.create_collection(
                 collection_name=self.COLLECTION_NAME,
@@ -37,62 +43,69 @@ class QdrantStorage:
             )
 
         # Create payload keyword indexes for fast filtering
-        self.sync_client.create_payload_index(
-            collection_name=self.COLLECTION_NAME,
-            field_name="workspace_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-        self.sync_client.create_payload_index(
-            collection_name=self.COLLECTION_NAME,
-            field_name="document_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-        self.sync_client.create_payload_index(
-            collection_name=self.COLLECTION_NAME,
-            field_name="is_reference",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
+        try:
+            self.sync_client.create_payload_index(
+                collection_name=self.COLLECTION_NAME,
+                field_name="workspace_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self.sync_client.create_payload_index(
+                collection_name=self.COLLECTION_NAME,
+                field_name="document_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self.sync_client.create_payload_index(
+                collection_name=self.COLLECTION_NAME,
+                field_name="is_reference",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass  # Index already exists
 
     async def upsert_points(self, points: List[PointStruct]) -> None:
         """
-        Upsert vector points into Qdrant collection.
+        Upsert vector points into the evidentia_chunks collection.
         """
         await self.async_client.upsert(
             collection_name=self.COLLECTION_NAME,
             points=points,
         )
 
-    async def search_document(
+    async def search_chunks(
         self,
         workspace_id: str,
-        document_id: str,
         query_vector: List[float],
-        limit: int = 5,
+        document_id: Optional[str] = None,
         is_reference: Optional[bool] = None,
+        limit: int = 10,
     ) -> List[ScoredPoint]:
         """
-        Perform vector similarity search strictly scoped to workspace_id and document_id.
+        Query top matching chunks within a specific workspace.
         """
-        must_conditions = [
+        must_filters = [
             FieldCondition(
                 key="workspace_id",
                 match=MatchValue(value=str(workspace_id)),
-            ),
-            FieldCondition(
-                key="document_id",
-                match=MatchValue(value=str(document_id)),
-            ),
+            )
         ]
 
+        if document_id:
+            must_filters.append(
+                FieldCondition(
+                    key="document_id",
+                    match=MatchValue(value=str(document_id)),
+                )
+            )
+
         if is_reference is not None:
-            must_conditions.append(
+            must_filters.append(
                 FieldCondition(
                     key="is_reference",
                     match=MatchValue(value=is_reference),
                 )
             )
 
-        query_filter = Filter(must=must_conditions)
+        query_filter = Filter(must=must_filters)
 
         response = await self.async_client.query_points(
             collection_name=self.COLLECTION_NAME,
