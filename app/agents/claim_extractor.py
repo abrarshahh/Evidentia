@@ -1,4 +1,5 @@
 import re
+import asyncio
 import logging
 from typing import List, Dict, Any
 from app.schemas.document_index import DocumentSkeletonIndex
@@ -133,7 +134,7 @@ Return a JSON object matching this exact structure:
         """
         Execute map-reduce claim extraction for large multi-section documents.
         """
-        # Map Phase: Partition nodes into 4,000-char chunks
+        # Map Phase: Partition nodes into 20,000-char chunks (~5,000 tokens) to minimize API call count
         chunks: List[List[Dict[str, Any]]] = []
         current_chunk: List[Dict[str, Any]] = []
         current_chars = 0
@@ -147,7 +148,7 @@ Return a JSON object matching this exact structure:
                 "page": n.page_range[0] if n.page_range else 1,
                 "text": n.text,
             }
-            if current_chars + len(n.text) > 4000 and current_chunk:
+            if current_chars + len(n.text) > 20000 and current_chunk:
                 chunks.append(current_chunk)
                 current_chunk = [item]
                 current_chars = len(n.text)
@@ -158,14 +159,17 @@ Return a JSON object matching this exact structure:
         if current_chunk:
             chunks.append(current_chunk)
 
-        logger.info(f"Map-Reduce claim extraction: processing {len(chunks)} document chunks...")
+        logger.info(f"Map-Reduce claim extraction: processing {len(chunks)} document chunks in parallel...")
 
-        # Execute Map Phase on each chunk
-        mapped_claims: List[Dict[str, Any]] = []
-        for chunk in chunks:
-            prompt = f"""Extract all explicit claims from this document chunk.
+        # Concurrency limit bound by Gemini pool size (minimum 2 concurrent workers)
+        pool_size = max(2, llm_client.get_pool_size())
+        semaphore = asyncio.Semaphore(pool_size)
+
+        async def process_chunk(chunk_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            async with semaphore:
+                prompt = f"""Extract all explicit claims from this document chunk.
 Chunk Nodes:
-{chunk}
+{chunk_data}
 
 Claim Types:
 - factual, financial, compliance, technical, legal, performance, safety, efficacy, statistical, promotional, comparative, quality, other
@@ -183,11 +187,19 @@ Return a JSON object:
   ]
 }}
 """
-            try:
-                res = await llm_client.generate_json(prompt=prompt)
-                mapped_claims.extend(res.get("claims", []))
-            except Exception as e:
-                logger.warning(f"Chunk map extraction skipped on chunk error: {e}")
+                try:
+                    res = await llm_client.generate_json(prompt=prompt)
+                    return res.get("claims", [])
+                except Exception as e:
+                    logger.warning(f"Chunk map extraction skipped on chunk error: {e}")
+                    return []
+
+        # Execute Map Phase on all chunks concurrently
+        results = await asyncio.gather(*[process_chunk(c) for c in chunks])
+
+        mapped_claims: List[Dict[str, Any]] = []
+        for chunk_claims in results:
+            mapped_claims.extend(chunk_claims)
 
         # Reduce Phase: Aggregate and format
         claims: List[ExtractedClaim] = []

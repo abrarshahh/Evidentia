@@ -27,6 +27,8 @@ class WorkspaceRole(str, enum.Enum):
     owner = "owner"
     admin = "admin"
     member = "member"
+    editor = "editor"
+    viewer = "viewer"
 
 
 class DocumentRole(str, enum.Enum):
@@ -63,12 +65,24 @@ class EnrichmentStatus(str, enum.Enum):
 
 
 class ClaimType(str, enum.Enum):
+    safety = "safety"
+    efficacy = "efficacy"
+    statistical = "statistical"
+    promotional = "promotional"
+    financial = "financial"
+    compliance = "compliance"
+    technical = "technical"
+    legal = "legal"
+    performance = "performance"
+    quality = "quality"
+    comparative = "comparative"
     statistic = "statistic"
     causal = "causal"
     comparison = "comparison"
     quote = "quote"
     definition = "definition"
     prediction = "prediction"
+    factual = "factual"
     other = "other"
 
 
@@ -224,7 +238,7 @@ class Claim(Base):
     __tablename__ = "claims"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=False)
+    analysis_id = Column(UUID(as_uuid=True), ForeignKey("analyses.id"), nullable=True)
     text = Column(Text, nullable=False)
     claim_type = Column(Enum(ClaimType, native_enum=False), nullable=False, default=ClaimType.other)
     source_node_ids = Column(JSONB, nullable=False)

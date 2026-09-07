@@ -86,12 +86,10 @@ class StructuralDocumentParser:
 
                     visual_elem = VisualElement(
                         visual_id=visual_id,
-                        type="table",
-                        original_caption=None,
-                        generated_caption=f"Table on page {page_idx}",
-                        page_range=[page_idx],
-                        structured_data={"rows": table_data},
-                        owner_node_id=node_id,
+                        node_id=node_id,
+                        visual_type="table",
+                        page_no=page_idx,
+                        caption=f"Table on page {page_idx}",
                     )
                     visuals.append(visual_elem)
                     page_visuals.append(visual_id)

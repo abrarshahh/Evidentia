@@ -22,6 +22,8 @@ from app.auth.security import (
 )
 from app.core.config import settings
 
+from app.core.logging_config import set_log_context
+
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 security_scheme = HTTPBearer()
@@ -72,6 +74,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    set_log_context(user_id=user.email)
     return user
 
 

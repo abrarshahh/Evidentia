@@ -107,5 +107,71 @@ class MinIOStorage:
             expires=timedelta(minutes=expires_minutes),
         )
 
+    def remove_document_objects(
+        self,
+        workspace_id: str,
+        document_id: str,
+        minio_raw_path: Optional[str] = None,
+    ) -> None:
+        """
+        Purge all raw files and skeleton index JSON artifacts associated with document_id from MinIO.
+        """
+        # Delete specific raw path if provided
+        if minio_raw_path:
+            try:
+                self.client.remove_object(self.RAW_DOCUMENTS_BUCKET, minio_raw_path)
+            except Exception:
+                pass
+
+        # Purge all objects under raw/{workspace_id}/{document_id}/
+        try:
+            raw_objects = self.client.list_objects(
+                self.RAW_DOCUMENTS_BUCKET,
+                prefix=f"raw/{workspace_id}/{document_id}/",
+                recursive=True,
+            )
+            for obj in raw_objects:
+                self.client.remove_object(self.RAW_DOCUMENTS_BUCKET, obj.object_name)
+        except Exception:
+            pass
+
+        # Delete skeleton index JSON object
+        index_key = f"indexes/{workspace_id}/{document_id}/skeleton.json"
+        try:
+            self.client.remove_object(self.INDEXES_BUCKET, index_key)
+        except Exception:
+            pass
+
+        # Purge all objects under indexes/{workspace_id}/{document_id}/
+        try:
+            idx_objects = self.client.list_objects(
+                self.INDEXES_BUCKET,
+                prefix=f"indexes/{workspace_id}/{document_id}/",
+                recursive=True,
+            )
+            for obj in idx_objects:
+                self.client.remove_object(self.INDEXES_BUCKET, obj.object_name)
+        except Exception:
+            pass
+
+    def remove_workspace_objects(self, workspace_id: str) -> None:
+        """
+        Purge all raw documents, indexes, exports, and log files associated with workspace_id from MinIO.
+        """
+        buckets_prefixes = [
+            (self.RAW_DOCUMENTS_BUCKET, f"raw/{workspace_id}/"),
+            (self.INDEXES_BUCKET, f"indexes/{workspace_id}/"),
+            (self.EXPORTS_BUCKET, f"exports/{workspace_id}/"),
+            (self.LOGS_BUCKET, f"logs/{workspace_id}/"),
+        ]
+
+        for bucket, prefix in buckets_prefixes:
+            try:
+                objs = self.client.list_objects(bucket, prefix=prefix, recursive=True)
+                for obj in objs:
+                    self.client.remove_object(bucket, obj.object_name)
+            except Exception:
+                pass
+
 
 minio_client = MinIOStorage()

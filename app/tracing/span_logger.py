@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any, Callable
 from app.db.session import AsyncSessionLocal
 from app.db.models import TraceSpan, ToolCall, SpanStatus
 
+from app.core.logging_config import set_log_context
+
 logger = logging.getLogger(__name__)
 
 # Context variable to maintain active span ID across async calls
@@ -28,6 +30,9 @@ async def span_tracer(
     """
     Async context manager wrapping execution spans and persisting trace records to PostgreSQL.
     """
+    if analysis_id:
+        set_log_context(analysis_id=str(analysis_id))
+
     parent_span = active_span_id.get()
     span_id = uuid.uuid4()
     token = active_span_id.set(span_id)
@@ -53,15 +58,20 @@ async def span_tracer(
     span_info = {"span_id": span_id, "trace_id": trace_id_str, "output_ref": None}
     final_status = SpanStatus.success
 
+    logger.info(f"Agent Span Started: step='{step}', agent='{agent_name or step}', span_id={span_id}, trace_id={trace_id_str}")
+
     try:
         yield span_info
     except Exception as e:
         final_status = SpanStatus.failed
+        logger.error(f"Agent Span Failed: step='{step}', span_id={span_id}, error={e}")
         raise e
     finally:
         ended_at = datetime.utcnow()
         duration_ms = int((time.perf_counter() - t0) * 1000)
         output_ref = span_info.get("output_ref")
+
+        logger.info(f"Agent Span Completed: step='{step}', status={final_status.value}, duration={duration_ms}ms")
 
         async with AsyncSessionLocal() as session:
             db_span = await session.get(TraceSpan, span_id)
