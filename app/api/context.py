@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_async_session
-from app.db.models import Claim, ClaimContext, WorkspaceMember
+from app.db.models import Claim, ClaimContext, WorkspaceMember, Analysis
 from app.schemas.context import ContextBuildingResult, ClaimContextAssociation
 from app.auth.dependencies import verify_workspace_access
 
@@ -20,11 +20,20 @@ async def get_document_context(
     db: AsyncSession = Depends(get_async_session),
 ):
     """
-    Get all claim context associations and sufficiency decisions for a document.
+    Get all claim context associations and sufficiency decisions for a document in a workspace.
     """
     from sqlalchemy.orm import joinedload
 
-    query = select(ClaimContext).join(Claim).options(joinedload(ClaimContext.claim))
+    query = (
+        select(ClaimContext)
+        .join(Claim, ClaimContext.claim_id == Claim.id)
+        .join(Analysis, Claim.analysis_id == Analysis.id)
+        .options(joinedload(ClaimContext.claim))
+        .where(
+            Analysis.workspace_id == workspace_id,
+            Analysis.base_document_id == document_id,
+        )
+    )
     res = await db.execute(query)
     db_contexts = res.scalars().all()
 

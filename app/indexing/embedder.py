@@ -98,6 +98,7 @@ class NodeEmbedder:
         self,
         workspace_id: str,
         index: DocumentSkeletonIndex,
+        is_reference: bool = False,
     ) -> DocumentSkeletonIndex:
         """
         Embed all document nodes locally and upsert point vectors with payload metadata to Qdrant.
@@ -129,7 +130,7 @@ class NodeEmbedder:
                 "page_range": node.page_range,
                 "char_offsets": node.char_offsets,
                 "text": node.text,
-                "is_reference": False,
+                "is_reference": is_reference,
             }
 
             points.append(

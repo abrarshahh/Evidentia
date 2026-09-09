@@ -1,9 +1,12 @@
 import math
+import uuid
 import logging
 from typing import List, Tuple, Optional, Set
 from app.schemas.claims import ExtractedClaim, ClaimType
 from app.indexing.embedder import node_embedder
 from app.indexing.llm_client import llm_client
+from app.tracing.span_logger import span_tracer
+from app.tracing.cost_mapper import cost_mapper
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +44,27 @@ class ClaimReconciliationEngine:
     ) -> List[Tuple[int, int, float]]:
         """
         Identify candidate duplicate claim index pairs whose vector cosine similarity exceeds threshold.
+        For large claim sets (>50), scopes evaluation to claims sharing source nodes, sections,
+        or within localized index windows.
         """
         candidates: List[Tuple[int, int, float]] = []
         n = len(claims)
 
         for i in range(n):
+            claim_a = claims[i]
+            nodes_a = set(claim_a.source_node_ids)
+            sec_a = claim_a.section_path
+
             for j in range(i + 1, n):
+                claim_b = claims[j]
+                nodes_b = set(claim_b.source_node_ids)
+                sec_b = claim_b.section_path
+
+                # Structural locality scope check for large claim sets
+                if n > 50 and abs(i - j) > 30 and not (nodes_a & nodes_b):
+                    if sec_a and sec_b and sec_a != sec_b:
+                        continue
+
                 sim = cls.compute_cosine_similarity(embeddings[i], embeddings[j])
                 if sim >= threshold:
                     candidates.append((i, j, round(sim, 4)))
@@ -123,62 +141,82 @@ If NOT duplicates, return:
         cls,
         claims: List[ExtractedClaim],
         similarity_threshold: float = 0.85,
+        analysis_id: Optional[uuid.UUID] = None,
+        workspace_id: Optional[str] = None,
     ) -> List[ExtractedClaim]:
         """
-        Reconcile duplicate claims using vector embeddings and Gemini 3.6 Flash verification.
+        Reconcile duplicate claims using vector embeddings and Gemini 3.6 Flash verification with tracing.
         """
-        if len(claims) <= 1:
-            return claims
+        async with span_tracer("claim_reconciliation", agent_name="ReconciliationEngine", analysis_id=analysis_id) as span_info:
+            if len(claims) <= 1:
+                return claims
 
-        logger.info(f"Reconciling {len(claims)} claims with cosine threshold {similarity_threshold}...")
+            logger.info(f"Reconciling {len(claims)} claims with cosine threshold {similarity_threshold}...")
 
-        # 1. Generate embeddings for claim statements
-        statements = [c.statement for c in claims]
-        try:
-            embeddings = node_embedder.generate_embeddings(statements)
-        except Exception as e:
-            logger.error(f"Embedding generation for claim statements failed: {e}. Skipping reconciliation.")
-            return claims
+            # 1. Generate embeddings for claim statements
+            statements = [c.statement for c in claims]
+            try:
+                embeddings = node_embedder.generate_embeddings(statements)
+            except Exception as e:
+                logger.error(f"Embedding generation for claim statements failed: {e}. Skipping reconciliation.")
+                return claims
 
-        # 2. Find candidate pairs exceeding similarity threshold
-        candidates = cls.find_candidate_duplicates(claims, embeddings, threshold=similarity_threshold)
-        logger.info(f"Found {len(candidates)} candidate duplicate pair(s) above threshold {similarity_threshold}.")
+            # 2. Find candidate pairs exceeding similarity threshold
+            candidates = cls.find_candidate_duplicates(claims, embeddings, threshold=similarity_threshold)
+            logger.info(f"Found {len(candidates)} candidate duplicate pair(s) above threshold {similarity_threshold}.")
 
-        if not candidates:
-            return claims
+            if not candidates:
+                return claims
 
-        # 3. Process candidate pairs and merge duplicates
-        merged_indices: Set[int] = set()
-        claim_map: Dict[int, ExtractedClaim] = {i: claim for i, claim in enumerate(claims)}
+            # 3. Process candidate pairs and merge duplicates
+            merged_indices: Set[int] = set()
+            claim_map: Dict[int, ExtractedClaim] = {i: claim for i, claim in enumerate(claims)}
 
-        for i, j, sim in candidates:
-            if i in merged_indices or j in merged_indices:
-                continue
+            for i, j, sim in candidates:
+                if i in merged_indices or j in merged_indices:
+                    continue
 
-            claim_a = claim_map[i]
-            claim_b = claim_map[j]
+                claim_a = claim_map[i]
+                claim_b = claim_map[j]
 
-            logger.info(f"Checking candidate pair [{i}] and [{j}] (Similarity: {sim:.4f})...")
-            merged_claim = await cls.reconcile_pair_llm(claim_a, claim_b)
+                logger.info(f"Checking candidate pair [{i}] and [{j}] (Similarity: {sim:.4f})...")
+                merged_claim = await cls.reconcile_pair_llm(claim_a, claim_b)
 
-            if merged_claim:
-                logger.info(f"Successfully merged claim [{claim_a.claim_id}] and [{claim_b.claim_id}].")
-                claim_map[i] = merged_claim
-                merged_indices.add(j)
+                if merged_claim:
+                    logger.info(f"Successfully merged claim [{claim_a.claim_id}] and [{claim_b.claim_id}].")
+                    claim_map[i] = merged_claim
+                    merged_indices.add(j)
 
-        # 4. Consolidate final claim list and re-number IDs
-        final_claims: List[ExtractedClaim] = []
-        new_counter = 1
+            # 4. Consolidate final claim list and re-number IDs
+            final_claims: List[ExtractedClaim] = []
+            new_counter = 1
 
-        for idx in range(len(claims)):
-            if idx not in merged_indices:
-                c = claim_map[idx]
-                c.claim_id = f"c_{new_counter:03d}"
-                new_counter += 1
-                final_claims.append(c)
+            for idx in range(len(claims)):
+                if idx not in merged_indices:
+                    c = claim_map[idx]
+                    c.claim_id = f"c_{new_counter:03d}"
+                    new_counter += 1
+                    final_claims.append(c)
 
-        logger.info(f"Claim reconciliation complete: reduced from {len(claims)} to {len(final_claims)} claims.")
-        return final_claims
+            logger.info(f"Claim reconciliation complete: reduced from {len(claims)} to {len(final_claims)} claims.")
+
+            if workspace_id:
+                payload = {
+                    "input_claims_count": len(claims),
+                    "candidate_pairs_found": len(candidates),
+                    "reconciled_claims_count": len(final_claims),
+                }
+                await cost_mapper.record_span_usage(
+                    span_id=span_info["span_id"],
+                    workspace_id=workspace_id,
+                    trace_id=span_info["trace_id"],
+                    model_name="gemini-3.6-flash",
+                    tokens_in=len(candidates) * 150,
+                    tokens_out=len(candidates) * 50,
+                    payload_data=payload,
+                )
+
+            return final_claims
 
 
 reconciliation_engine = ClaimReconciliationEngine()

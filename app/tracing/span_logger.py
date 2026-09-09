@@ -89,47 +89,63 @@ async def span_tracer(
 def trace_tool(tool_name: Optional[str] = None):
     """
     Decorator to wrap custom tool invocations and persist execution metrics to PostgreSQL.
+    Supports both sync and async tool functions transparently.
     """
     def decorator(func: Callable):
         t_name = tool_name or func.__name__
 
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
+        def record_tool_call(input_data: dict, duration_ms: int):
             span_id = active_span_id.get()
-            t0 = time.perf_counter()
-            result = None
+            if not span_id:
+                return
+            result_bytes = len(json.dumps(input_data, default=str).encode("utf-8"))
 
-            input_data = {}
-            if kwargs:
-                input_data = {k: str(v)[:200] for k, v in kwargs.items()}
-            elif args:
-                input_data = {"args": [str(a)[:200] for a in args]}
+            async def _save():
+                try:
+                    async with AsyncSessionLocal() as session:
+                        call_record = ToolCall(
+                            span_id=span_id,
+                            tool_name=t_name,
+                            args=input_data,
+                            result_size_bytes=result_bytes,
+                            duration_ms=duration_ms,
+                            called_at=datetime.utcnow(),
+                        )
+                        session.add(call_record)
+                        await session.commit()
+                except Exception as ex:
+                    logger.error(f"Failed to record tool call span: {ex}")
 
             try:
-                if asyncio.iscoroutinefunction(func):
-                    result = await func(*args, **kwargs)
-                else:
-                    result = func(*args, **kwargs)
-                return result
-            finally:
-                duration_ms = int((time.perf_counter() - t0) * 1000)
-                result_bytes = len(json.dumps(input_data).encode("utf-8"))
+                loop = asyncio.get_running_loop()
+                loop.create_task(_save())
+            except RuntimeError:
+                try:
+                    asyncio.run(_save())
+                except Exception:
+                    pass
 
-                if span_id:
-                    try:
-                        async with AsyncSessionLocal() as session:
-                            call_record = ToolCall(
-                                span_id=span_id,
-                                tool_name=t_name,
-                                args=input_data,
-                                result_size_bytes=result_bytes,
-                                duration_ms=duration_ms,
-                                called_at=datetime.utcnow(),
-                            )
-                            session.add(call_record)
-                            await session.commit()
-                    except Exception as ex:
-                        logger.error(f"Failed to record tool call span: {ex}")
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                t0 = time.perf_counter()
+                input_data = {k: str(v)[:200] for k, v in kwargs.items()} if kwargs else {"args": [str(a)[:200] for a in args]}
+                try:
+                    return await func(*args, **kwargs)
+                finally:
+                    duration_ms = int((time.perf_counter() - t0) * 1000)
+                    record_tool_call(input_data, duration_ms)
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                t0 = time.perf_counter()
+                input_data = {k: str(v)[:200] for k, v in kwargs.items()} if kwargs else {"args": [str(a)[:200] for a in args]}
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    duration_ms = int((time.perf_counter() - t0) * 1000)
+                    record_tool_call(input_data, duration_ms)
+            return sync_wrapper
 
-        return async_wrapper
     return decorator

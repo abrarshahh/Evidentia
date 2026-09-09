@@ -25,6 +25,7 @@ class ExtractedClaim(BaseModel):
     statement: str
     claim_type: ClaimType = ClaimType.FACTUAL
     source_node_ids: List[str] = Field(default_factory=list)
+    section_path: Optional[str] = None
     page_range: List[int] = Field(default_factory=list)
     confidence_score: float = Field(default=0.8, ge=0.0, le=1.0)
 

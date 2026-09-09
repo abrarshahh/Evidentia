@@ -5,7 +5,7 @@ import hashlib
 import logging
 from typing import List
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
@@ -17,29 +17,31 @@ from app.db.models import (
 from app.schemas.documents import DocumentResponse
 from app.schemas.workspaces import WorkspaceRole
 from app.schemas.document_index import DocumentSkeletonIndex
+from app.schemas.tasks import TaskResponse
 from app.auth.dependencies import verify_workspace_access, require_workspace_role
 from app.storage.minio_client import minio_client
 from app.storage.qdrant_client import qdrant_client
 from app.indexing.structural_parser import StructuralDocumentParser
 from app.indexing.enrichment import enrichment_engine
 from app.indexing.embedder import node_embedder
+from workers.tasks import create_task_record, run_document_indexing_task, get_task_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/documents", tags=["Documents"])
 
 
-@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(
     workspace_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     membership: WorkspaceMember = Depends(require_workspace_role([WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.EDITOR])),
     db: AsyncSession = Depends(get_async_session),
 ):
     """
-    Upload a document (PDF/TXT), stream raw file to MinIO, automatically trigger
-    the full indexing pipeline (structural parsing, enrichment, Qdrant vector embedding),
-    and record document and index metadata in PostgreSQL.
+    Upload a document (PDF/TXT), stream raw file to MinIO, record pending document
+    in PostgreSQL, and immediately dispatch full indexing pipeline to background worker.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
@@ -66,7 +68,7 @@ async def upload_document(
         logger.error(f"MinIO upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to upload document to MinIO: {e}")
 
-    # Record pending document entry in PostgreSQL
+    # 2. Record pending document entry in PostgreSQL
     doc_record = Document(
         id=document_id,
         workspace_id=workspace_id,
@@ -77,68 +79,31 @@ async def upload_document(
         created_at=datetime.utcnow(),
     )
     db.add(doc_record)
-    await db.flush()
+    await db.commit()
+    await db.refresh(doc_record)
 
-    # 2. Automatic Indexing Pipeline
-    try:
-        # Step A: Structural Parser (PDF vs TXT)
-        if file.filename.lower().endswith(".pdf"):
-            skeleton = StructuralDocumentParser.parse_pdf(file_bytes, title=file.filename)
-        else:
-            text_content = file_bytes.decode("utf-8", errors="replace")
-            skeleton = StructuralDocumentParser.parse_text(text_content, title=file.filename)
+    # 3. Register and dispatch background indexing task
+    task_id = str(uuid.uuid4())
+    create_task_record(task_id, "document_indexing", str(document_id), str(workspace_id))
+    background_tasks.add_task(run_document_indexing_task, task_id, document_id, workspace_id)
 
-        doc_record.status = DocumentStatus.parsed
-        doc_record.page_count = skeleton.metadata.total_pages
+    logger.info(f"Document {document_id} upload recorded. Dispatched background task {task_id}.")
+    return doc_record
 
-        # Step B: Gemini Enrichment (Glossaries & Visuals)
-        enriched_skeleton = await enrichment_engine.enrich(skeleton)
 
-        # Step C: Gemini Embeddings & Qdrant Cloud Vector Upsert
-        indexed_skeleton = await node_embedder.upsert_document_index(
-            workspace_id=str(workspace_id),
-            index=enriched_skeleton,
-        )
-
-        # Step D: Save generated skeleton JSON to MinIO indexes bucket
-        index_minio_key = f"indexes/{workspace_id}/{document_id}/skeleton.json"
-        index_json_bytes = indexed_skeleton.model_dump_json(indent=2).encode("utf-8")
-
-        minio_client.client.put_object(
-            bucket_name=minio_client.INDEXES_BUCKET,
-            object_name=index_minio_key,
-            data=io.BytesIO(index_json_bytes),
-            length=len(index_json_bytes),
-            content_type="application/json",
-        )
-
-        # Step E: Save DocumentIndex record in PostgreSQL
-        doc_idx = DocumentIndex(
-            document_id=document_id,
-            minio_index_path=index_minio_key,
-            coverage_pct=100.0,
-            node_count=len(indexed_skeleton.nodes),
-            enrichment_status=EnrichmentStatus.full,
-            built_at=datetime.utcnow(),
-        )
-        db.add(doc_idx)
-
-        # Mark document as fully indexed
-        doc_record.status = DocumentStatus.indexed
-        await db.commit()
-        await db.refresh(doc_record)
-
-        logger.info(f"Document {document_id} uploaded & automatically indexed successfully ({len(indexed_skeleton.nodes)} nodes).")
-        return doc_record
-
-    except Exception as e:
-        logger.error(f"Automatic document indexing failed for document {document_id}: {e}")
-        doc_record.status = DocumentStatus.failed
-        await db.commit()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Document uploaded to MinIO but automatic indexing failed: {e}",
-        )
+@router.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_indexing_task_status(
+    workspace_id: uuid.UUID,
+    task_id: str,
+    membership: WorkspaceMember = Depends(verify_workspace_access),
+):
+    """
+    Query current status of a background document indexing task.
+    """
+    task = get_task_status(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return task
 
 
 @router.get("/", response_model=List[DocumentResponse])
@@ -185,8 +150,16 @@ async def get_document_index(
     db: AsyncSession = Depends(get_async_session),
 ):
     """
-    Retrieve the complete DocumentSkeletonIndex JSON.
+    Retrieve the complete DocumentSkeletonIndex JSON for a document in a workspace.
     """
+    doc_query = select(Document).where(
+        Document.workspace_id == workspace_id,
+        Document.id == document_id,
+    )
+    doc_res = await db.execute(doc_query)
+    if not doc_res.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Document not found in workspace.")
+
     index_minio_key = f"indexes/{workspace_id}/{document_id}/skeleton.json"
     try:
         minio_res = minio_client.client.get_object(

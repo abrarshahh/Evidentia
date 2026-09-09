@@ -105,7 +105,8 @@ class LLMClient:
             for attempt in range(max_attempts_per_model):
                 client, client_idx = await self._get_next_client()
                 try:
-                    response = client.models.generate_content(
+                    response = await asyncio.to_thread(
+                        client.models.generate_content,
                         model=m,
                         contents=prompt,
                         config=config,
