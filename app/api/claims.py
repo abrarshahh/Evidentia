@@ -28,6 +28,7 @@ router = APIRouter(prefix="/api/v1/workspaces/{workspace_id}/documents/{document
 async def extract_document_claims(
     workspace_id: uuid.UUID,
     document_id: uuid.UUID,
+    analysis_id: Optional[uuid.UUID] = None,
     membership: WorkspaceMember = Depends(require_workspace_role([WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.EDITOR])),
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -97,6 +98,7 @@ async def extract_document_claims(
             logger.warning(f"Unrecognized claim_type '{c.claim_type}', defaulting to DBClaimType.other")
 
         db_claim = Claim(
+            analysis_id=analysis_id,
             text=c.statement,
             claim_type=db_type,
             source_node_ids=c.source_node_ids,
