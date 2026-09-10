@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr
 class WorkspaceRole(str, Enum):
     OWNER = "owner"
     ADMIN = "admin"
+    MEMBER = "member"
     EDITOR = "editor"
     VIEWER = "viewer"
 
@@ -39,7 +40,7 @@ class WorkspaceMemberResponse(BaseModel):
 
 class WorkspaceMemberAdd(BaseModel):
     email: EmailStr
-    role: WorkspaceRole = WorkspaceRole.EDITOR
+    role: WorkspaceRole = WorkspaceRole.MEMBER
 
 
 class WorkspaceMemberRoleUpdate(BaseModel):

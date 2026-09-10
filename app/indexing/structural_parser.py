@@ -14,6 +14,7 @@ from app.schemas.document_index import (
     GlossaryEntry,
     CoverageMetrics,
     PageView,
+    BoundingBox,
 )
 
 
@@ -84,12 +85,23 @@ class StructuralDocumentParser:
                     end_offset = current_char_offset + len(table_text)
                     current_char_offset = end_offset + 1
 
+                    x0, top, x1, bottom = table_obj.bbox
+                    tbl_bbox = BoundingBox(
+                        x=round(float(x0), 2),
+                        y=round(float(top), 2),
+                        w=round(float(x1 - x0), 2),
+                        h=round(float(bottom - top), 2),
+                    )
+                    orig_caption = f"Table on page {page_idx}"
+
                     visual_elem = VisualElement(
                         visual_id=visual_id,
                         node_id=node_id,
                         visual_type="table",
                         page_no=page_idx,
-                        caption=f"Table on page {page_idx}",
+                        bbox=tbl_bbox,
+                        original_caption=orig_caption,
+                        caption=orig_caption,
                     )
                     visuals.append(visual_elem)
                     page_visuals.append(visual_id)
@@ -109,7 +121,64 @@ class StructuralDocumentParser:
                     if current_section:
                         current_section.node_ids.append(node_id)
 
-                # 2. Extract non-table text lines from page
+                # 2. Extract figures/images and their bounding boxes
+                page_images = getattr(page, "images", []) or []
+                for img in page_images:
+                    x0 = float(img.get("x0", 0))
+                    top = float(img.get("top", 0))
+                    x1 = float(img.get("x1", x0 + img.get("width", 0)))
+                    bottom = float(img.get("bottom", top + img.get("height", 0)))
+                    w = max(1.0, float(x1 - x0))
+                    h = max(1.0, float(bottom - top))
+                    if w < 20 or h < 20:
+                        continue
+
+                    visual_id = f"visual_p{page_idx}_{visual_counter}"
+                    node_id = f"n_{node_counter:03d}"
+                    visual_counter += 1
+                    node_counter += 1
+
+                    img_bbox = BoundingBox(
+                        x=round(x0, 2),
+                        y=round(top, 2),
+                        w=round(w, 2),
+                        h=round(h, 2),
+                    )
+                    orig_caption = f"Figure on page {page_idx} ({int(w)}x{int(h)})"
+
+                    fig_visual = VisualElement(
+                        visual_id=visual_id,
+                        node_id=node_id,
+                        visual_type="figure",
+                        page_no=page_idx,
+                        bbox=img_bbox,
+                        original_caption=orig_caption,
+                        caption=orig_caption,
+                    )
+                    visuals.append(fig_visual)
+                    page_visuals.append(visual_id)
+
+                    fig_text = f"[Figure {visual_id}: Page {page_idx} Bounding Box ({int(x0)}, {int(top)}, {int(w)}, {int(h)})]"
+                    start_offset = current_char_offset
+                    end_offset = current_char_offset + len(fig_text)
+                    current_char_offset = end_offset + 1
+
+                    fig_node = DocumentNode(
+                        node_id=node_id,
+                        node_type="figure",
+                        parent_section_id=current_section.section_id if current_section else None,
+                        page_range=[page_idx],
+                        char_offsets=[start_offset, end_offset],
+                        text=fig_text,
+                        cross_refs=[visual_id],
+                    )
+                    nodes.append(fig_node)
+                    page_nodes.append(node_id)
+
+                    if current_section:
+                        current_section.node_ids.append(node_id)
+
+                # 3. Extract non-table text lines from page
                 # Crop non-table regions or filter text lines outside table bboxes
                 raw_text = page.extract_text(layout=False) or ""
                 lines = [line.strip() for line in raw_text.split("\n") if line.strip()]

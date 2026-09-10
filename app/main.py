@@ -10,6 +10,7 @@ from app.api.workspaces import router as workspaces_router
 from app.api.documents import router as documents_router
 from app.api.claims import router as claims_router
 from app.api.context import router as context_router
+from app.api.analyses import router as analyses_router
 
 # Initialize Centralized Logging System
 setup_logging(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
@@ -64,6 +65,7 @@ app.include_router(workspaces_router)
 app.include_router(documents_router)
 app.include_router(claims_router)
 app.include_router(context_router)
+app.include_router(analyses_router)
 
 
 @app.get("/health", tags=["Health"])

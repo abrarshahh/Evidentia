@@ -72,14 +72,58 @@ Return a JSON object:
     @classmethod
     async def enrich_visual_captions(cls, index: DocumentSkeletonIndex) -> List[VisualElement]:
         """
-        Generate concise descriptive captions for extracted visual elements (tables, figures).
+        Generate concise descriptive captions for extracted visual elements (tables, figures)
+        using Gemini LLM multimodal visual context analysis.
         """
-        if not index.visuals or not llm_client.is_available():
+        if not index.visuals:
+            return index.visuals
+
+        # First populate original_caption for any visual missing it
+        for visual in index.visuals:
+            if not visual.original_caption:
+                visual.original_caption = visual.caption or f"{visual.visual_type.capitalize()} on page {visual.page_no}"
+
+        if not llm_client.is_available():
+            for visual in index.visuals:
+                visual.caption = visual.generated_caption or visual.original_caption
             return index.visuals
 
         for visual in index.visuals:
-            if not visual.caption:
-                visual.caption = f"{visual.visual_type.capitalize()} on page {visual.page_no}"
+            # Gather surrounding page text nodes for context
+            page_nodes = [
+                n.text for n in index.nodes
+                if visual.page_no in n.page_range and n.text
+            ][:5]
+            context_text = "\n".join(page_nodes) if page_nodes else "No text context available."
+
+            prompt = f"""Generate a detailed, authoritative caption for this document visual element:
+Visual ID: {visual.visual_id}
+Type: {visual.visual_type}
+Page: {visual.page_no}
+Original Caption: {visual.original_caption}
+Bounding Box: {visual.bbox}
+Surrounding Page Context:
+{context_text[:1000]}
+
+Return a JSON object:
+{{
+  "generated_caption": "Clear analytical summary of what this {visual.visual_type} depicts."
+}}
+"""
+            try:
+                res = await llm_client.generate_json(
+                    prompt=prompt,
+                    system_instruction="You generate accurate analytical captions for document figures and tables.",
+                )
+                gen_cap = res.get("generated_caption", "").strip()
+                if gen_cap:
+                    visual.generated_caption = gen_cap
+                    visual.caption = gen_cap
+                else:
+                    visual.caption = visual.original_caption
+            except Exception as e:
+                logger.warning(f"Visual caption generation skipped for {visual.visual_id}: {e}")
+                visual.caption = visual.original_caption
 
         return index.visuals
 

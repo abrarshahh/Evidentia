@@ -26,10 +26,11 @@ class StructureSection(BaseModel):
 class DocumentNode(BaseModel):
     node_id: str
     parent_section_id: Optional[str] = None
-    node_type: str  # "heading" | "paragraph" | "list_item" | "table"
+    node_type: str  # "heading" | "paragraph" | "list_item" | "table" | "figure"
     text: str
     page_range: List[int] = []
     char_offsets: List[int] = []
+    cross_refs: List[str] = Field(default_factory=list)
     embedding_id: Optional[str] = None
 
 
@@ -46,6 +47,8 @@ class VisualElement(BaseModel):
     visual_type: str  # "table" | "figure" | "chart"
     page_no: int
     bbox: Optional[BoundingBox] = None
+    original_caption: Optional[str] = None
+    generated_caption: Optional[str] = None
     caption: Optional[str] = None
 
 

@@ -62,7 +62,7 @@ class CoverageChecker:
         index: DocumentSkeletonIndex,
         claims: List[ExtractedClaim],
         target_coverage: float = 98.0,
-        max_passes: int = 2,
+        max_passes: int = 1,
         analysis_id: Optional[uuid.UUID] = None,
     ) -> Tuple[List[ExtractedClaim], CoverageMetrics]:
         """

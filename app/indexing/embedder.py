@@ -129,7 +129,7 @@ class NodeEmbedder:
                 "parent_section_id": node.parent_section_id,
                 "page_range": node.page_range,
                 "char_offsets": node.char_offsets,
-                "text": node.text,
+                "text_preview": node.text[:200] if node.text else "",
                 "is_reference": is_reference,
             }
 
